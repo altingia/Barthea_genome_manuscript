@@ -1,0 +1,82 @@
+# 3.Barthea_Resequence
+## 01.run fastp
+/home/hwc/software/fastp -i HD03_L1_119A19.R1.fastq.gz -I HD03_L1_119A19.R2.fastq.gz -o ../clean_read/HD03_L1_119A19.R1.clean.fq.gz -O ../clean_read/HD03_L1_119A19.R2.clean.fq.gz -h HD03_L1_119A19.html -j HD03_L1_119A19.json
+
+## 02.variant_calling
+### index
+ln -s  ~/genome.fasta  ./genome.fasta
+samtools faidx genome.fasta 
+bwa index  genome.fasta  
+picard CreateSequenceDictionary R=genome.fasta
+
+### mapping
+bwa mem -t 12  -R '@RG\tID:HD03\tSM:HD03\tPL:illumina' ../01.ref/genome.fasta ../../0.QC/clean_read/HD03_L1_119A19.R1.clean.fq.gz ../../0.QC/clean_read/HD03_L1_119A19.R2.clean.fq.gz | samtools sort -@ 2 -m 1G -o HD03.sort.bam -
+
+picard -Xmx8g  MarkDuplicates I=HD03.sort.bam O=HD03.sort.rmdup.bam  CREATE_INDEX=true  REMOVE_DUPLICATES=true M=HD03.marked_dup_metrics.txt
+
+samtools  flagstat  HD03.sort.bam > HD03.sort.bam.flagstat
+
+/home/hwc/software/samtools-1.10/samtools  coverage  HD03.sort.bam > HD03.sort.bam.coverage2
+
+samtools depth 	HD03.sort.bam > HD03.sort.bam.depth.txt
+
+### calling
+gatk --java-options "-Xmx10g -Djava.io.tmpdir=./tmp" HaplotypeCaller -R ../01.ref/genome.fasta -I ../02.mapping/HD03.sort.rmdup.bam  -ERC GVCF -O HD03.g.vcf 1>HD03.HC.log   2>&1 &
+ls ./*.g.vcf > gvcf.list
+gatk  --java-options "-Xmx4g -Djava.io.tmpdir=./tmp"    CombineGVCFs -R ../01.ref/genome.fasta -V gvcf.list  -O all.merge.g.vcf
+gatk  --java-options "-Xmx4g -Djava.io.tmpdir=./tmp"   GenotypeGVCFs -R ../01.ref/genome.fasta --variant all.merge.g.vcf -O all.merge_raw.vcf
+
+
+#### call SNP
+gatk  --java-options "-Xmx4g -Djava.io.tmpdir=./tmp"  SelectVariants  -R ../01.ref/genome.fasta -V all.merge_raw.vcf --select-type SNP -O all.raw.snp.vcf
+gatk  --java-options "-Xmx4g -Djava.io.tmpdir=./tmp"  VariantFiltration -R ../01.ref/genome.fasta -V all.raw.snp.vcf --filter-expression "QD < 2.0 || MQ < 40.0 || FS > 60.0 || SOR > 3.0 || MQRankSum < -12.5 || ReadPosRankSum < -8.0" --filter-name 'SNP_filter' -O all.filter.snp.vcf
+gatk  --java-options "-Xmx4g -Djava.io.tmpdir=./tmp"  SelectVariants  -R ../01.ref/genome.fasta -V all.filter.snp.vcf --exclude-filtered  -O all.filtered.snp.vcf
+
+#### call indel
+gatk  --java-options "-Xmx4g -Djava.io.tmpdir=./tmp"  SelectVariants  -R ../01.ref/genome.fasta -V all.merge_raw.vcf --select-type INDEL -O all.raw.indel.vcf
+gatk  --java-options "-Xmx4g -Djava.io.tmpdir=./tmp"  VariantFiltration -R ../01.ref/genome.fasta -V all.raw.indel.vcf --filter-expression "QD < 2.0 || FS > 200.0 || SOR > 10.0 || MQRankSum < -12.5 || ReadPosRankSum < -8.0" --filter-name 'INDEL_filter' -O all.filter.indel.vcf
+gatk  --java-options "-Xmx4g -Djava.io.tmpdir=./tmp"  SelectVariants  -R ../01.ref/genome.fasta -V all.filter.indel.vcf  --exclude-filtered   -O all.filtered.indel.vcf
+
+### 03.vairant_annotation
+mkdir ./data/
+cp ~/software/snpEff/snpEff.config ./
+
+echo  "# my own genome, version Barthea
+Barthea.genome : Barthea
+" >> snpEff.config
+
+mkdir ./data/Barthea
+cp ../01.annovar/genome.fasta ./data/Barthea/sequences.fa
+cp ../01.annovar/genome.gtf ./data/Barthea/genes.gtf
+
+nohup java -jar ~/software/snpEff/snpEff.jar build -c ./snpEff.config  -gtf22 -v Barthea &
+
+nohup java -Xmx20g -jar ~/software/snpEff/snpEff.jar -c ./snpEff.config -ud 2000 -csvStats Bar_snp.csv -htmlStats Bar_snp.html -o vcf Barthea ../../1.variant_calling/03.SNP_indel/all.filtered.snp.vcf > all.filtered.snp.ann.vcf &
+
+nohup java -Xmx20g -jar ~/software/snpEff/snpEff.jar -c ./snpEff.config -ud 2000 -csvStats Bar_indel.csv -htmlStats Bar_indel.html -o vcf Barthea ../../1.variant_calling/03.SNP_indel/all.filtered.indel.vcf  > all.filtered.indel.ann.vcf &
+
+### 04.polulation_genetics
+#### filter
+##### filter missing and maf
+plink --vcf ../../1.variant_calling/03.SNP_indel/all.filtered.snp.vcf --geno 0.2 --maf 0.05 --out all.missing_maf --recode vcf-iid --allow-extra-chr --chr-set 76 no-xy no-mt --set-missing-var-ids @:# --keep-allele-order
+
+##### filter LD
+plink --vcf  all.missing_maf.vcf  --indep-pairwise 50 10 0.2 --out tmp.ld   --allow-extra-chr --chr-set 76 no-xy no-mt --set-missing-var-ids @:#
+plink --vcf  all.missing_maf.vcf  --make-bed --extract tmp.ld.prune.in  --out all.LDfilter --recode vcf-iid  --keep-allele-order  --allow-extra-chr --chr-set 76 no-xy no-mt --set-missing-var-ids @:#
+
+##### ML tree
+nohup /pub/anaconda3/bin/raxml-ng -all  -msa sequences.phy --model GTR+G --bs-trees 1000 --prefix out_treeBS --threads 2 --seed 123   1>raxml_bs.log 2>raxml_bs.err &
+
+##### PCA_plink
+hup plink --vcf ../../../00.filter/all.LDfilter.vcf --pca 20 --out PCA_out --chr-set 76 no-xy no-mt --allow-extra-chr --set-missing-var-ids @:#
+
+##### structure
+seq 2 9 | awk '{print "admixture --cv -j4 all.bed "$1" 1>admix."$1".log 2>&1"}' > admixture.sh
+nohup sh admixture.sh &
+
+##### LDdecay
+~/software/PopLDdecay/bin/PopLDdecay -InVCF  ../data/all.vcf -SubPop  ../data/pop.SC.table -MaxDist 500 -OutStat pop.stat
+
+##### selection_popgenome
+Rscript Pop_Genome.R --vcf Test.vcf.gz --chr chrlist --group groupinfo
+

@@ -1,0 +1,118 @@
+# 1.assembly
+
+## 01.kmer_analysis
+pre=Kmer_21
+ls  survey_*.fastq.gz | awk  '{print "gzip -dc "$0 }' > generate.file
+/home/hwc/anaconda3/bin/jellyfish count -t 4 -C -m 19 -s 1G  -g generate.file -G 2  -o $pre 
+/home/hwc/anaconda3/bin/jellyfish histo -v -o $pre.histo $pre -t 4 -h 10000
+/home/hwc/anaconda3/bin/jellyfish stats $pre -o $pre.stat
+Rscript /home/hwc/software/genomescope/genomescope.R Kmer_21.histo 19 150 ./ 100000
+## 02.assembly_FALCON
+fc_run fc_run.cfg
+fc_unzip.py fc_unzip.cfg
+
+
+## 03.assembly_polish
+### Create a file to record the location information of the second-generation sequence
+realpath LGH_L4_104104.R1.fastq LGH_L4_104104.R2.fastq  > sgs.fofn
+
+### 从NextPolish目录下复制配置文件
+cp ~/opt/biosoft/NextPolish/doc/run.cfg run2.cfg
+
+### Modifying a configuration file
+[General]
+job_type = local
+job_prefix = nextPolish
+task = default
+rewrite = 1212
+rerun = 3
+parallel_jobs = 6
+multithread_jobs = 10
+genome = raw_genome.fasta
+genome_size = auto
+workdir = ./01_rundir
+polish_options = -p {multithread_jobs}
+[sgs_option]
+sgs_fofn = ./sgs.fofn
+sgs_options = -max_depth 100 -bwa
+[lgs_option]
+lgs_fofn = ./lgs.fofn
+lgs_options = -min_read_len 1k -max_depth 100
+lgs_minimap2_options = -x map-pb -t {multithread_jobs}
+
+### run nextPolish
+nextPolish run2.cfg
+
+### run allhic
+k=20
+genome=~/NextPolish/01_rundir/purged.fa
+fq1=~/BDHC200000129-1A_1.fq
+fq2=~/BDHC200000129-1A_2.fq
+
+ln -s  $genome ./draft.asm.fasta
+bwa index  draft.asm.fasta  
+samtools faidx draft.asm.fasta  
+
+bwa aln -t 20 draft.asm.fasta $fq1 > sample_R1.sai  
+bwa aln -t 20 draft.asm.fasta $fq2 > sample_R2.sai  
+bwa sampe draft.asm.fasta sample_R1.sai sample_R2.sai $fq1 $fq2 > sample.bwa_aln.sam 
+
+PreprocessSAMs.pl  sample.bwa_aln.sam draft.asm.fasta  HINDIII
+filterBAM_forHiC.pl  sample.bwa_aln.REduced.paired_only.bam sample.clean.sam
+samtools view -H sample.bwa_aln.bam >header
+cat header sample.clean.sam | samtools view -bS - > sample.clean.bam
+samtools view -bt  draft.asm.fasta.fai  sample.clean.sam > sample.clean.bam
+
+ALLHiC_partition -b sample.clean.bam -r draft.asm.fasta -e AAGCTT -k $k
+
+allhic extract sample.clean.bam draft.asm.fasta --RE AAGCTT
+
+for K in `seq 1 $k`
+do 
+    allhic optimize sample.clean.counts_AAGCTT.*g${K}.txt sample.clean.clm
+done
+
+ALLHiC_build draft.asm.fasta
+
+seqkit   fx2tab -l -i  -n  groups.asm.fasta > len.txt
+grep 'sample.clean.counts_AAGCTT' len.txt > chrn.list
+ALLHiC_plot sample.clean.bam groups.agp chrn.list 500k pdf
+
+# 2.Gene Structure Annotation
+## 01.Repeat prediction and non-coding RNA annotation
+### Repeat annotation
+/pub/software/RepeatModeler/BuildDatabase -name sesame genome.fasta
+/pub/software/RepeatModeler/RepeatModeler -database sesame -pa 20 -LTRStruct
+/pub/software/RepeatMasker/RepeatMasker -pa 20 -qq -lib sesame-families.fa test_data/genome.fasta >repeatmasker.log 2>&1
+
+### non-coding RNA annotation
+tRNAscan-SE -o tRNA.out -f tRNA.ss -m tRNA.stats ~/genome.fasta
+cmsearch --cut_ga --nohmmonly --rfam --noali --cpu 8 --tblout rfam_out.tab /opt/biosoft/infernal-1.1.3/Rfam.cm ~/genome.fasta  > rfam_out.txt
+
+## 02.Gene prediction
+/opt/biosoft/geta-2.4.5/bin/geta.pl --RM_species Viridiplantae --genome /home/hwc/data/GeneStructureAnnotation/genome.allhic.fasta -1 /home/hwc/data/GeneStructureAnnotation/transcriptomes/lengguohua2_w_L1_394X94.R1.fastq.gz,/home/hwc/data/GeneStructureAnnotation/transcriptomes/lengguohua3_w_L1_183A83.R1.fastq.gz,/home/hwc/data/GeneStructureAnnotation/transcriptomes/STJ1_FRAS202088039-1a_1.fq.gz,/home/hwc/data/GeneStructureAnnotation/transcriptomes/STJ2_FRAS202088040-1r_1.fq.gz,/home/hwc/data/GeneStructureAnnotation/transcriptomes/STJ3_FRAS202088041-1r_1.fq.gz,/home/hwc/data/GeneStructureAnnotation/transcriptomes/TJS1_FRAS202088036-1r_1.fq.gz,/home/hwc/data/GeneStructureAnnotation/transcriptomes/TJS2_FRAS202088037-1r_1.fq.gz,/home/hwc/data/GeneStructureAnnotation/transcriptomes/TJS3_FRAS202088038-1r_1.fq.gz,/home/hwc/data/GeneStructureAnnotation/transcriptomes/TJSY_FRAS202088042-1a_1.fq.gz -2 /home/hwc/data/GeneStructureAnnotation/transcriptomes/lengguohua2_w_L1_394X94.R2.fastq.gz,/home/hwc/data/GeneStructureAnnotation/transcriptomes/lengguohua3_w_L1_183A83.R2.fastq.gz,/home/hwc/data/GeneStructureAnnotation/transcriptomes/STJ1_FRAS202088039-1a_2.fq.gz,/home/hwc/data/GeneStructureAnnotation/transcriptomes/STJ2_FRAS202088040-1r_2.fq.gz,/home/hwc/data/GeneStructureAnnotation/transcriptomes/STJ3_FRAS202088041-1r_2.fq.gz,/home/hwc/data/GeneStructureAnnotation/transcriptomes/TJS1_FRAS202088036-1r_2.fq.gz,/home/hwc/data/GeneStructureAnnotation/transcriptomes/TJS2_FRAS202088037-1r_2.fq.gz,/home/hwc/data/GeneStructureAnnotation/transcriptomes/TJS3_FRAS202088038-1r_2.fq.gz,/home/hwc/data/GeneStructureAnnotation/transcriptomes/TJSY_FRAS202088042-1a_2.fq.gz --protein /home/hwc/data/GeneStructureAnnotation/Sp10.fa --augustus_species Barthea_barthei_20210107 --out_prefix out --cpu 40 --gene_prefix Barthea --pfam_db /opt/biosoft/hmmer-3.2.1/Pfam-AB.hmm
+
+## 03.Gene functional annotation
+### NR
+diamond blastp --db nr --query ./proteins.fasta --out Nr.xml --outfmt 5 --sensitive --max-target-seqs 20 --evalue 1e-5 --id 10 --index-chunks 1
+
+### COG
+diamond blastp --db kog --query ./proteins.fasta --out kog.xml --outfmt 5 --sensitive --max-target-seqs 200 --evalue 1e-5 --id 10 --tmpdir /dev/shm --index-chunks 1
+
+### eggNOG
+diamond blastp --db eggnog_proteins  --query ./proteins.fasta --out eggNOG.xml --outfmt 5 --sensitive --max-target-seqs 20 --evalue 1e-5 --id 10 --tmpdir /dev/shm --index-chunks 1
+
+### Pfam
+para_hmmscan.pl --outformat --cpu 4 --hmm_db Pfam-A.hmm ./proteins.fasta > Pfam.tab
+
+### Interpro
+/opt/biosoft/interproscan/interproscan.sh --output-file-base out --cpu 8 --formats TSV,XML,GFF3 --goterms --input ./proteins.fasta
+
+### KAAS: http://www.genome.jp/kaas-bin/kaas_main web tools to submit sequence
+gene_annotation_from_kaas.pl query.ko > KEGG.txt
+
+### GO: Integrate GO annotation results in eggNOG and InterPro
+go_from_eggNOG_and_interpro.pl ../04.eggNOG/eggNOG.emapper.annotations ../05.InterPro/interpro.tsv > go.annot
+go_reducing_go_number_para.pl /opt/biosoft/go_class/bin/go-basic.obo go.annot 8 > go_reduced.annot
+sort go_reduced.annot > go.annot; rm go_reduced.annot
+gene_annotation_from_table.pl go.annot > GO.txt

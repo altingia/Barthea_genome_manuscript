@@ -1,0 +1,66 @@
+# 4.MYB GeneFamily and transcriptome analysi
+## 01.MYB identify
+### hmm
+hmmsearch    --cut_tc   --domtblout 	myb.domtblout    -o Fmyb.hmmout    ./myb.hmm    bar.pep.fa  
+
+awk '$7<0.01 && $1 !~ /^#/ {print $0 }' myb.domtblout   > myb.domtblout.filter
+
+awk '{print $1}'  myb.domtblout.filter |   sort -u >  myb.domtblout.filter.id
+
+
+### blast
+makeblastdb -in myb.Ath.fasta  -dbtype prot
+
+blastp -query myb.pep.fasta   -db myb.Ath.fasta   -evalue 1e-5   -outfmt '6 std qlen slen'    -out  myb.blastout  
+
+awk ' $3 > 30 {print $1} '  myb.blastout |   sort -u > myb.blastout.filter.id
+ 
+cat myb.domtblout.filter.id  myb.SPL.blastout.filter.id |  sort |uniq -c |awk '$1 == 2{print $2}' > myb.geneID
+
+seqtk subseq  bar.pep.fasta  myb.geneID  > myb.pep.fasta
+seqtk subseq  bar.cds.fasta  myb.geneID  > myb.cds.fasta
+
+## 02.MYB tree
+mafft myb.pep.fasta > myb.pep.aln.fasta
+fasttree -out myb.fasttree.nwk  myb.pep.aln.fasta
+
+## 03.rna-seq data filter
+/opt/biosoft/FastQC/fastqc ../00.data/rawdata_changname/EHZ1_R1.fastq.gz ../00.data/rawdata_changname/EHZ1_R2.fastq.gz  -t 6 &
+java -jar /home/hwc/software/Trimmomatic-0.39/trimmomatic-0.39.jar PE -threads 8 /disk/hwc/Barthea_transcriptome/00.data/rawdata_changname/EHZ1_R1.fastq.gz /disk/hwc/Barthea_transcriptome/00.data/rawdata_changname/EHZ1_R2.fastq.gz EHZ1_R1.clean.fastq.gz EHZ1_R1.unpaired.fastq.gz EHZ1_R2.clean.fastq.gz EHZ1_R2.unpaired.fastq.gz ILLUMINACLIP:/opt/biosoft/Trimmomatic-0.38/adapters/TruSeq3-PE.fa:2:30:10 LEADING:3 TRAILING:3 SLIDINGWINDOW:4:15 MINLEN:36 TOPHRED33 &
+
+## 04.clean data mapping
+### make exon 
+hisat2_extract_exons.py genome.gtf > genome.exon
+
+### make splice site
+hisat2_extract_splice_sites.py genome.gtf > genome.ss
+
+###build index
+hisat2-build -p 12 --exon genome.exon --ss genome.ss genome.fasta genome.gtf >hisat2_build.log 2>&1
+
+### mapping 
+hisat2 -p 6 -x build_index/genome.gtf -1 ../02.Trimmomatic/EHZ1_R1.clean.fastq.gz -2 ../02.Trimmomatic/EHZ1_R2.clean.fastq.gz -S EHZ1.sam > EHZ1.log 2>&1
+samtools sort -@ 4 -O BAM -o EHZ1.bam EHZ1.sam
+samtools index EHZ1.bam
+
+## 05.featurecount
+ln -s ../03.mapping/*.bam ./
+
+### feature count
+featureCounts -t exon -g gene_id -Q 10 --primary -s 0 -p -T 4 -a ../03.mapping/build_index/genome.gtf -o rawcount_featureCounts EHZ1.bam  EHZ2.bam  EHZ3.bam  STJ1.bam  STJ2.bam  STJ3.bam  TJS1.bam  TJS2.bam  TJS3.bam > rawcount_featureCounts.log 2>&1 &
+
+### fishing result
+less -SN rawcount_featureCounts |cut -f 1,7-15 |grep -v "#" | sed 's/.bam//g' |sed 's/Geneid//g' > genes.counts.matrix
+
+## 06.DEseq2
+cp ../04-merge_result/genes.counts.matrix .
+nohup ~/software/trinityrnaseq-v2.14.0/Analysis/DifferentialExpression/run_DE_analysis.pl --matrix genes.counts.matrix --method DESeq2 --samples_file sample.txt &
+
+## 07.get obvious expression gene
+less deseq2.obj.res.df.txt |awk '{if($7 < 0.05) print $0}' |awk '{if($3 > 1 || $3 < -1) print $0}' |cut -f 1 |grep "Bar" > obvious_gene.id
+less deseq2.obj.res.df.txt |awk '{if($7 < 0.05) print $0}' |awk '{if($3 > 1) print $0}' |cut -f 1 |grep "Bar" > obvious_up.id
+less deseq2.obj.res.df.txt |awk '{if($7 < 0.05) print $0}' |awk '{if($3 < -1) print $0}' |cut -f 1 |grep "Bar" > obvious_down.id
+
+cp ../../gene_prediction/out.pep.fasta ./
+seqtk subseq out.pep.fasta obvious_down.id > obvious_down.pep.fa
+seqtk subseq out.pep.fasta obvious_up.id > obvious_up.pep.fa

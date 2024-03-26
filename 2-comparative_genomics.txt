@@ -1,0 +1,172 @@
+# 2.comparative_genomics
+
+## 01.Gene Family Cluster
+orthofinder -f data \
+	-S diamond \
+	-M msa \
+	-T fasttree \
+	-t 20
+
+## 02.Phylogenetic Tree
+### Orthofinder
+orthDir=~/01.GeneFamilyCluster/data/OrthoFinder/Results_Dec03/
+ln -s  $orthDir/MultipleSequenceAlignments/SpeciesTreeAlignment.fa
+~/anaconda3/bin/raxmlHPC-PTHREADS  -T 5 -m PROTGAMMAJTT -f a -p 123 -x 123 -# 100 -n out -s  SpeciesTreeAlignment.fa   1>tree.log 2>tree.err
+
+### Astral
+orthDir=~/01.GeneFamilyCluster/data/OrthoFinder/Results_Dec03/
+cat  $orthDir/Orthogroups/Orthogroups_SingleCopyOrthologues.txt |while read aa; do cat  $orthDir/Gene_Trees/$aa\_tree.txt | awk '{print $0}'   ;done > SingleCopy.trees
+sed 's/\([(,]\{1\}[A-Za-z]\+\)_[^:]\+/\1/g' SingleCopy.trees > Astral_input.trees
+java  -jar ~/software/Astral/astral.5.7.3.jar  -i  Astral_input.trees  -o Astral_output.tree 2>out.log
+
+## 03.Divergence times
+### Data Preparation
+orthoDir=~/01.GeneFamilyCluster/data/OrthoFinder/Results_Dec03
+cp $orthoDir/Species_Tree/SpeciesTree_rooted.txt ./
+cp $orthoDir/MultipleSequenceAlignments/SpeciesTreeAlignment.fa ./
+cat SpeciesTreeAlignment.fa |tr '\n' '\t'|sed 's/>/\n/g' |sed 's/\t/      /'|sed 's/\t//g'| awk 'NF > 0' > supergene.phy.tmp
+awk '{print "  "NR"  "length($2)}'  supergene.phy.tmp|tail -n 1 | cat -  supergene.phy.tmp >  supergene.phy
+
+### step1 Estimate site replacement rate
+### Set seqtype to 2 in the mcmctree.ctl configuration file. Set usedata to 3 to run mcmctree
+mcmctree mcmctree.ctl
+
+### Copy the generated tmp0001.ctl to codem. ctl and add clock = 1. Example Change getSE to 0. 
+cp tmp0001.ctl codeml.ctl
+echo "clock = 1" >> codeml.ctl
+sed -i 's/\(getSE.*=\s*\d/getSE = 0/' codeml.ctl
+
+### Modify the generated tmp0001.trees file by fixing the root (add a pair of parentheses) and adding the fossil time
+
+### Run codeml to see the replacement rate in the tmp0001.out result,
+codeml  codeml.ctl
+
+### step2 Use the approximate likelihood method to calculate the differentiation time
+### Adjust the second parameter b of rgene_gamma in mcmctree.ctl so that a/b is approximately equal to the replacement rate obtained earlier, and set usedata to run 3
+mcmctree  mcmctree.ctl
+mv out.BV in.BV
+
+### Set the McMctree. ctl configuration file usedata to 2 and run mcmctree
+mcmctree  mcmctree.ctl 
+
+
+## 04.Gene Family Change
+### Generate a tree file whose branch length is the differentiation time
+sed 's/\[&95%HPD={[0-9]\+\.[0-9]\+, [0-9]\+\.[0-9]\+}\]//g' FigTree.tre | grep "UTREE" |sed 's/\s\+UTREE 1 = //' |sed 's/\([),]\)/\n\1/g' | awk -F ": " '{if($2~/[0-9]/){printf $1": "$2*100}else{print $0}}' |sed 's/\s\+//g'> divtime.tree
+
+### Generate a gene count table
+cut -f 1-13 Orthogroups.GeneCount.tsv | awk '{print $1"\t"$0}' > input_genecount.tab
+
+### Filter species-specific gene families
+less  input_genecount.tab | \
+        awk '{sp=0; for(i=3; i<= NF; i++){if($i>0){sp+=1}} ; if(sp>=2 || NR ==1 ){print $0}}' > input_genecount_f1.tab
+
+### Manually modify the cafe configuration file to generate caf.script
+# cat cafe.script
+# #!/opt/biosoft/CAFE-4.2.1/release/cafe
+# date
+# #specify data file, p-value threshold, # of threads to use, and log file
+# load -i input_genecount_f1.tab -p 0.01 -t 20 -l log.txt
+#
+# #the phylogenetic tree structure with branch lengths
+# tree (mgu:168.517,(vvt:153.408,(((ptr:122.514,(csi:116.067,(ath:102.327,grm:102.327):13.7398):6.4469):9.8153,(pps:122.598,(mtr:110.45,cme:110.45):12.1477):9.7309):7.7208,(egr:105.609,(mec:37.4266,bar:37.4266):68.183):34.4401):13.3587):15.1085)
+#
+# lambda -s
+# #report output
+# report global_cafe.out
+#
+# date
+
+### Run cafe
+cafe cafe.script
+
+
+### The cafe results were summarized and counted
+source  activate py27
+
+python  ~/script/cafetutorial_report_analysis.py -i  global_cafe.out.cafe -o  global_cafe.out.summary > global_cafe.out.summary.log
+
+## Extraction of family ID and gene from the significant contraction and expansion of B.barthei
+less -S global_cafe.out.summary_fams.txt | awk '$1~/bar/' |cut -f 2|sed 's/\,/\n/g' |grep "+" > bar.expand
+less -S global_cafe.out.summary_fams.txt | awk '$1~/bar/' |cut -f 2|sed 's/\,/\n/g' |grep "-" > bar.decrease
+
+awk -F "[" '{print $1}' bar.decrease > bar_decrease.famID
+awk -F "[" '{print $1}' bar.expand > bar_expand.famID
+
+less bar_expand.famID | while read aa; do grep $aa Orthogroups.tsv ;done |cut -f 1,3 > bar_expand.geneID
+less bar_decrease.famID | while read aa; do grep $aa Orthogroups.tsv ;done |cut -f 1,3 > bar_decrease.geneID
+
+
+## 05.Genome synteny and whole genome duplication
+### run MCScanX bar_vs_bar
+cp ~/Bar.pep.fasta ./
+cp ~/Bar.filter.gff3 ./
+
+diamond makedb   --in Bar.pep.fasta --db Bar.pep.fasta
+diamond blastp --query Bar.pep.fasta --db Bar.pep.fasta  --out Bar.blast --outfmt 6   --max-target-seqs 5 --evalue 1e-5
+
+awk '$3=="mRNA"' Bar.filter.gff3 | awk -F ";" '{print $1}'|awk '{print $1"\t"$9"\t"$4"\t"$5}'|sed 's/ID=//' > Bar.gff
+
+~/software/MCScanX/duplicate_gene_classifier -s 10 ./Bar > Bar.dup_class.log
+
+~/software/MCScanX/MCScanX -s 10 ./Bar
+
+cp ~/data/bar.cds.fasta ./
+
+perl ~/software/MCScanX/downstream_analyses/add_ka_and_ks_to_collinearity.pl -i Bar.collinearity -d bar.cds.fasta -o bar_bar.kaks > out.log 2>&1&
+
+awk -F "\t" 'NR>1 && $6 >0 {print $2"_"$3"\t"$6"\tBar"}' bar_bar.kaks | sort -u > Bar.ks
+
+
+### run MCScanX bar_vs_vvi
+cp ~/Bar.pep.fasta ./
+cp ~/Bar.filter.gff3 ./
+cp ~/Vvin.pep.fasta ./
+cp ~/Vvin.filter.gff3 ./
+
+diamond makedb   --in Bar.pep.fasta --db Bar.pep.fasta
+diamond makedb   --in Vvin.pep.fasta --db Vvin.pep.fasta
+diamond blastp --query Bar.pep.fasta --db Vvin.pep.fasta --out tmp.Bar_Vvin.blast  --outfmt 6   --max-target-seqs 5 --evalue 1e-5
+diamond blastp --query Vvin.pep.fasta --db Bar.pep.fasta --out tmp.Vvin_Bar.blast  --outfmt 6   --max-target-seqs 5 --evalue 1e-5
+
+cat tmp.Bar_Vvin.blast tmp.Vvin_Bar.blast > Bar-Vvin.blast
+
+sed 's/^chr/Chr/g' Vvin.filter.gff3 |awk '$3=="mRNA"' |awk -F ";" '{print $1}'|awk '{print $1"\t"$9"\t"$4"\t"$5}'|sed 's/ID=//' > Vvin.gff
+awk '$3=="mRNA"' Bar.filter.gff3 | awk -F ";" '{print $1}'|awk '{print $1"\t"$9"\t"$4"\t"$5}'|sed 's/ID=//' > Bar.gff
+
+cat Bar.gff Vvin.gff > Bar-Vvin.gff
+
+~/software/MCScanX/MCScanX -s 10 ./Bar-Vvin
+
+cat Bar-Vvin.collinearity | awk -F "\t" '{if($1~/^## Alig/){print "##"} else if($1 !~/#/){print $2"\t"$3 }}' |   awk '{if($1~/#/){print $0} else if($1~/^A/){print $2"\t"$1"\t1000"}else{print $0"\t"1000}}' > Vvin.Bar.anchors
+
+awk '{print $1"\t"$3"\t"$4"\t"$2}' Bar.gff > Bar.bed
+awk '{print $1"\t"$3"\t"$4"\t"$2}' Vvin.gff > Vvin.bed
+
+python -m jcvi.compara.synteny screen --minspan=10 --simple Vvin.Bar.anchors Vvin.Bar.anchors.new
+
+cut -f 1  Bar.bed |sort -u | awk '{printf $0","}' |sed 's/,$/\n/' > Bar.ids
+cut -f 1 Vvin.bed | uniq|sort -n | tr '\n' ',' > Vvin.ids
+vim Vvin.ids
+
+cat Vvin.ids Bar.ids > seqids
+
+vim layout
+
+python -m jcvi.graphics.karyotype  seqids  layout
+
+python -m jcvi.graphics.dotplot Vvin.Bar.anchors
+
+python -m jcvi.compara.synteny depth --histogram Vvin.Bar.anchors
+
+mv karyotype.pdf bar_vvt_karyotype.pdf
+
+
+cp ~/bar.cds.fasta ./
+cp ~/vvin.cds.fasta ./
+cat vvin.cds.fasta bar.cds.fasta > vvin_bar.cds.fasta
+
+perl ~/software/MCScanX/downstream_analyses/add_ka_and_ks_to_collinearity.pl -i Bar-Vvin.collinearity -d vvin_bar.cds.fasta -o vvin_bar.kaks > out.log 2>&1&
+
+awk -F "\t" 'NR>1 && $6 >0 {print $2"_"$3"\t"$6"\tBar-Vvt"}' vvin_bar.kaks | sort -u > Bar_Vvt.ks
+
